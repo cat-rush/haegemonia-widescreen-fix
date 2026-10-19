@@ -1,7 +1,7 @@
 # Haegemonia: Legions of Iron — Widescreen Mod (source)
 
 !!!
-ALL MADE USING DEEPSEEK BY A PERSON WHO HAS NO CLUE IN PROGRAMMING. I HAVE NO IDEA WHAT THE HELL IT IS.
+ALL IS MADE USING DEEPSEEK BY A PERSON WHO HAS NO CLUE IN PROGRAMMING. I HAVE NO IDEA WHAT THE HELL IT IS.
 !!!
 
 Source repository of the widescreen mod for the 2002 classic *Haegemonia:
