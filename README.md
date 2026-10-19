@@ -1,5 +1,7 @@
 # Haegemonia: Legions of Iron — Widescreen Mod (source)
 
+!!! ALL MADE USING DEEPSEEK BY A PERSON WHO HAS NO CLUE IN PROGRAMMING. I HAVE NO IDEA WHAT THE HELL IT IS. !!!
+
 Source repository of the widescreen mod for the 2002 classic *Haegemonia:
 Legions of Iron* (Steam v1.10): true 16:9 at 1080p/1440p/4K without
 stretching, 2x-resolution fonts, every UI element and clickable area
