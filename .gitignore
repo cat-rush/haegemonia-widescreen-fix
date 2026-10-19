@@ -1,0 +1,28 @@
+# Build artifacts
+*.dll
+*.exe
+*.o
+*.obj
+*.class
+
+# ...but keep the prebuilt small SCP editor
+!tools/scp/scpeditor.exe
+
+# Logs
+*.log
+refl_log.txt
+
+# Ghidra / RE generated outputs (regenerable via re/scripts)
+*report.txt
+*.dis
+*.bin
+memdump_*
+
+# Windows junk
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Font tool backups
+*.bak1x
+*.bakMOD

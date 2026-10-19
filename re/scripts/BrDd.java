@@ -1,0 +1,28 @@
+import ghidra.app.script.GhidraScript;
+import ghidra.program.model.listing.Function;
+import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompileResults;
+import java.io.FileWriter;
+import java.io.PrintWriter;
+
+public class BrDd extends GhidraScript {
+    public void run() throws Exception {
+        PrintWriter w = new PrintWriter(new FileWriter("C:\\Users\\Nova\\haegemonia-mod\\brdd_report.txt"));
+        DecompInterface d = new DecompInterface();
+        d.openProgram(currentProgram);
+        long[] fns = { 0x00710dddL, 0x00713126L, 0x009fe890L, 0x006d13f0L };
+        for (long a : fns) {
+            Function f = getFunctionContaining(toAddr(a));
+            if (f != null) {
+                w.println("==== " + f.getName() + " (" + f.getEntryPoint() + " .. " + f.getBody().getMaxAddress() + ") ====");
+                DecompileResults r = d.decompileFunction(f, 120, monitor);
+                if (r != null && r.getDecompiledFunction() != null)
+                    w.println(r.getDecompiledFunction().getC());
+                else w.println("(decompile failed)");
+            }
+        }
+        d.dispose();
+        w.close();
+        println("done");
+    }
+}
