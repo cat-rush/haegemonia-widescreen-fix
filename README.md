@@ -1,8 +1,6 @@
 # Haegemonia: Legions of Iron — Widescreen Fix (source)
 
-!!!
-ALL IS MADE USING DEEPSEEK BY A PERSON WHO HAS NO CLUE IN PROGRAMMING. I HAVE NO IDEA WHAT THE HELL IT IS.
-!!!
+!!! ALL IS MADE USING DEEPSEEK BY A PERSON WHO HAS NO CLUE IN PROGRAMMING !!!
 
 Source repository of the widescreen mod for the 2002 classic *Haegemonia:
 Legions of Iron* (Steam v1.10): true 16:9 at 1080p/1440p/4K without
@@ -50,7 +48,7 @@ hghook.ini          configuration example
 docs/               project documentation
   HANDOFF.md          the project diary: every fix, all addresses, traps
   AI_PLAYERS.md       the AI 0-7 extension, full story + patch inventory
-  MAP_SUBPROJECT.md   the custom multiplayer map project
+  SCRIPTING_REFERENCE.md   the bried guide how to understand .scp game scripts
 tools/font/         CHR font tool (rebuilds/replaces .chr fonts at
                     1x/2x/4x from any system font) + font scaler
 tools/inf/          InfTool - the .inf packer/unpacker (sources)
