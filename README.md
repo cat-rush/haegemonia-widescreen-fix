@@ -48,7 +48,7 @@ hghook.ini          configuration example
 docs/               project documentation
   HANDOFF.md          the project diary: every fix, all addresses, traps
   AI_PLAYERS.md       the AI 0-7 extension, full story + patch inventory
-  SCRIPTING_REFERENCE.md   the bried guide how to understand .scp game scripts
+  SCRIPTING_REFERENCE.md   brief guide how to understand .scp game scripts
 tools/font/         CHR font tool (rebuilds/replaces .chr fonts at
                     1x/2x/4x from any system font) + font scaler
 tools/inf/          InfTool - the .inf packer/unpacker (sources)
