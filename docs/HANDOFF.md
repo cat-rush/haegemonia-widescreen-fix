@@ -1,4 +1,4 @@
-# Haegemonia: Legions of Iron вЂ” Widescreen mod
+# Haegemonia: Legions of Iron Widescreen mod
 
 This document describes every fix, the reverse-engineered data behind it,
 all known addresses, and the build loop.
@@ -55,8 +55,7 @@ Known limitations / pending:
 
 - Warn and ask before anything resource-heavy or suspicious runs on the PC.
 - User installs tools manually. User runs the game and reports visually.
-- Never touch online/anti-cheat anything; this is single-player, fine.
-- User reports visual results; ask precisely (fractions of screen width).
+- User reports visual results; ask precisely.
 
 ## Environment
 
