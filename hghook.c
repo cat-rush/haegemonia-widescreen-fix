@@ -1,4 +1,77 @@
-// hghook.c - Haegemonia widescreen fix, v68 stable (2026-10-19)
+// hghook.c - Haegemonia widescreen fix, v73 stable (2026-10-19)
+// v73: three fixes:
+// - GAMELOG capture: the game's log writer (0x42A8AC) is mirrored to
+//   proj_log.txt (fmt + args). It caught the mission-killer: "ZLib
+//   Error: %i Script: %s" for heroorganizer.scp - see below.
+// - .scp file-open logging: every script the game opens is logged
+//   (FILEOPEN .scp) - invaluable for script-load debugging.
+// - mission scripts fixed (game data, not code):
+//   * the scpeditor's packer NEVER wrote the zlib ADLER32 trailer;
+//     the game's zlib inflate rejected every packed file the editor
+//     produced ("ZLib Error"). The mod's own randomevents/
+//     heroorganizer.scp (installed 19.10) was such a file - Ep5m5.scp
+//     includes it, the include failed, and the whole mission tree
+//     died (no timer, no dialogues, no task tracking - the user's
+//     e5m5 bug). Re-packed with a valid adler32 (both editors now
+//     write it - see scpeditor).
+//   * the user's e5m5 timer edit (counterE5M5.scp, 2:30) was fine
+//     format-wise, but the game's engine VALIDATES the mission timer
+//     total: hours=2 + minutes=30 (150 min) makes the script runtime
+//     die silently at init (no timer HUD + no triggers). 149 min
+//     (2:29) is the accepted maximum; the shipped file uses 2:29.
+// v72: SoundFix - DSERR_INVALIDCALL from SetNotificationPositions
+// (caller=0x189E59, the channel-restart setup) no longer disables
+// the sound: on the modern dsound emulation that call can fail for a
+// freshly recreated buffer after a device glitch even though the
+// buffer is playable (the streaming fill polls GetCurrentPosition,
+// notifications are not required). Only this hr at this site is
+// ignored; everything else keeps the v69 fallback.
+// v71: EffectGuard - the random access-violation crash (0x4357DA,
+// inside the game's DRM-protected 4MB block; also seen pre-v69 at
+// 0x65F18E) is a stale-pointer bug in the game's per-frame
+// effect/event pump: FUN_005cac5a walks the global element list
+// (0xC68314) and calls obj->vtbl+0xEC for each element; that method
+// (protected code, cannot be patched) dereferences obj's internal
+// event array [obj+0x34] (6 x 0x30-byte records of 8-byte entries).
+// The crash: [obj+0x34] == 1 (freed/never-allocated array) while the
+// object is still registered - EAX=1, the protected method reads
+// [1+idx*8+4] and dies. Guard: the vtable call at 0x5CACD8 is
+// re-targeted to a stub that validates obj + [obj+0x34] + the entry
+// count [obj+0x14]; broken objects are skipped (return 0, logged
+// once) and the game keeps running. Vanilla bug, not mod-related.
+// v70: SoundFix follow-up - the runtime error that used to cut the
+// sound was E_HANDLE (0x80070006) from the channel TEARDOWN path
+// (FUN_0057da88: Stop on a buffer that already died, logged as
+// caller=0x17DAF3). On old Windows that call succeeded; on modern
+// Windows the WASAPI-backed dsound emulation returns E_HANDLE there,
+// and vanilla treated it as fatal ("Sound System Error" - the user's
+// random crash). The teardown/pause sites (0x57DAF3/0x57DB27/0x57DC31)
+// now IGNORE the error (logged rate-limited) and the sound keeps
+// running - the channel is being torn down anyway, so there is
+// nothing to recover. All other error sites keep the v69 fallback
+// (log + sound-disabled, no exit).
+// v69: SoundFix - the "Sound System Error" crash is gone. The game's
+// DirectSound error handler FUN_00581d27 takes a fatal flag; every
+// call site passes 1 except the sound-server init's own create-fail
+// path (0x589134, arg 0), so any DirectSound failure in the init's
+// later steps (SetCooperativeLevel/CreateSoundBuffer/GetCaps) or at
+// runtime (buffer-lost, device change...) shows the "Sound System
+// Error" MessageBox and then exits via FUN_00582dcd. Now:
+// - the 4 fatal init call sites (0x58917E/0x589239/0x589275/0x5892C7)
+//   run the vanilla handler when hr >= 0, and when hr < 0 set the
+//   game's own sound-disabled flag (DAT_00c66fa0, the same flag the
+//   game's create-fail path sets) and jump to the init epilogue
+//   (0x5892D7) - startup failures degrade to the game's supported
+//   "NoSound" mode instead of exiting,
+// - the CONTROLUNAVAIL retry tail (0x58921B, 12 bytes) had no error
+//   check at all (a failed retry left the primary buffer NULL and
+//   crashed on the next GetCaps); it now checks and bails the same
+//   way,
+// - the fatal handler call inside FUN_00581d27 (0x582D3F) now logs
+//   the DirectSound message to proj_log.txt, sets the sound-disabled
+//   flag and RETURNS - runtime errors stop the audio but never kill
+//   the game (every sound-engine entry checks the flag).
+// Gated by hghook.ini [SoundFix] SoundErrorFallbackEnabled=1.
 // v68: screens opened WHILE a message is up no longer get the message
 // view shift. The fix-20 scene classification shifted ANY default-
 // camera scene first seen with a message active - a screen
@@ -516,6 +589,9 @@ static float bl_z_delta(void) {
     return 2.06f;
 }
 
+/* ---- v73 DIAG: log every .scp file the game opens + first bytes ---- */
+static HANDLE g_scp_handle = 0;
+
 static HANDLE WINAPI my_CreateFileA(LPCSTR name, DWORD acc, DWORD share,
         LPSECURITY_ATTRIBUTES sa, DWORD disp, DWORD flags, HANDLE tmpl) {
     HANDLE h = g_real_CreateFileA(name, acc, share, sa, disp, flags, tmpl);
@@ -527,6 +603,19 @@ static HANDLE WINAPI my_CreateFileA(LPCSTR name, DWORD acc, DWORD share,
     }
     if (h != INVALID_HANDLE_VALUE && is_starmap_alap_path(name)) {
         if (g_blpanel_n < 8) g_blpanel_handles[g_blpanel_n++] = h;
+    }
+    /* v73 DIAG: log .scp opens */
+    if (h != INVALID_HANDLE_VALUE && name) {
+        size_t l = strlen(name);
+        if (l > 4 && name[l - 4] == '.' &&
+            (name[l - 3] == 's' || name[l - 3] == 'S') &&
+            (name[l - 2] == 'c' || name[l - 2] == 'C') &&
+            (name[l - 1] == 'p' || name[l - 1] == 'P')) {
+            char b2[320];
+            _snprintf(b2, sizeof(b2), "== FILEOPEN .scp: %s ==\n", name);
+            log_line(b2);
+            g_scp_handle = h;
+        }
     }
     return h;
 }
@@ -685,6 +774,282 @@ static void patch_mode_caps(void* exe) {
         VirtualProtect(p3, 9, oldp, &oldp);
         log_line("== mode aspect filter (4:3-only) disabled ==\n");
     }
+}
+
+/* ---- SoundFix: DirectSound errors never kill the game ----
+   See the v69 header. Three patches, all verified against byte
+   signatures before writing, all idempotent (the re-patch loop
+   re-runs them harmlessly). ---- */
+
+static int g_cfg_soundfix = 1;   /* [SoundFix] SoundErrorFallbackEnabled */
+static int g_sfx_warned = 0;
+static int g_sfx_installed = 0;
+
+__attribute__((used)) static void* g_sfx_init_bail = 0;    /* 0x5892D7 - init epilogue */
+__attribute__((used)) static void* g_sfx_orig_581d27 = 0;  /* vanilla DS error handler */
+__attribute__((used)) static void* g_sfx_nosound = 0;      /* &DAT_00c66fa0 */
+__attribute__((used)) static void* g_sfx_retry_cont = 0;   /* 0x58923E */
+
+/* runtime fatal fallback: log the game's own DirectSound message + the
+   raw HRESULT + the return address of FUN_00581d27's caller (the exact
+   failing call site), then set the sound-disabled flag; the game keeps
+   running silently.
+   EXCEPTION: the channel teardown/pause paths (FUN_0057da88's two call
+   sites + FUN_0057dbce's) - Stop/SetCurrentPosition on a buffer that
+   already died returns E_HANDLE on modern Windows. The channel is
+   being torn down anyway, so the error is harmless: it is logged
+   (rate-limited) and IGNORED - the sound is kept running. */
+static DWORD g_sfx_ignored[16];   /* ignored-site return addresses logged */
+static int g_sfx_ignored_n = 0;
+
+static int sfx_teardown_site(DWORD ret) {
+    return ret == 0x57DAF3 ||   /* FUN_0057da88: Stop on dying buffer  */
+           ret == 0x57DB27 ||   /* FUN_0057da88: SetCurrentPosition(0) */
+           ret == 0x57DC31;     /* FUN_0057dbce: Stop on the pause path */
+}
+
+/* 0x589E59 = FUN_00589ccb's SetNotificationPositions (the channel
+   restart setup). On the modern WASAPI-backed dsound emulation it can
+   return DSERR_INVALIDCALL for a freshly created buffer right after a
+   device glitch even though the buffer itself is playable; the game's
+   streaming fill polls GetCurrentPosition, so the channel works fine
+   without notifications. Ignore ONLY this hr at this site and keep
+   the sound. */
+static int sfx_notify_site_ignorable(DWORD ret, int hr) {
+    return ret == 0x589E59 && hr == (int)0x88780032;
+}
+
+__attribute__((used, noinline)) static void sound_fatal_fallback(DWORD callersite, int hr,
+                                                                const char* msg) {
+    char buf[700];
+    if (sfx_teardown_site(callersite) || sfx_notify_site_ignorable(callersite, hr)) {
+        int known = 0;
+        for (int i = 0; i < g_sfx_ignored_n; i++) {
+            if (g_sfx_ignored[i] == callersite) { known = 1; break; }
+        }
+        if (!known) {
+            if (g_sfx_ignored_n < 16) g_sfx_ignored[g_sfx_ignored_n++] = callersite;
+            _snprintf(buf, sizeof(buf),
+                "== SoundFix: teardown-site error IGNORED (sound kept): hr=0x%08X caller=0x%05X msg=\"%s\" ==\n",
+                (unsigned)hr, (unsigned)(callersite - 0x400000),
+                (msg && *msg) ? msg : "(unknown code)");
+            log_line(buf);
+        }
+        return;
+    }
+    _snprintf(buf, sizeof(buf),
+        "== SoundFix: DirectSound error hr=0x%08X caller=0x%05X msg=\"%s\" - sound disabled, game continues ==\n",
+        (unsigned)hr, (unsigned)(callersite - 0x400000),
+        (msg && *msg) ? msg : "(unknown code)");
+    log_line(buf);
+    if (g_exe) {
+        BYTE* p = (BYTE*)g_exe + (0xC66FA0 - 0x400000);
+        DWORD oldp;
+        VirtualProtect(p, 1, PAGE_READWRITE, &oldp);
+        *p = 1;
+        VirtualProtect(p, 1, oldp, &oldp);
+    }
+}
+
+/* replaces the 4 fatal CALL 0x581d27 sites in the sound-server init.
+   Entry state: ECX = this, [esp] = retaddr, [esp+4] = hr, [esp+8] = fatal.
+   hr >= 0: tail into the vanilla handler (it does RET 8).
+   hr < 0: set the sound-disabled flag, drop retaddr + args, jump to
+   the init epilogue 0x5892D7 (POP EDI; MOV ESP,EBP; POP EBP; RET). */
+__attribute__((naked)) static void stub_sound_init_check(void) {
+    __asm__ volatile (
+        "cmpl $0, 4(%esp)\n"
+        "jge 1f\n"
+        "movl _g_sfx_nosound, %eax\n"
+        "movb $1, (%eax)\n"
+        "popl %eax\n"
+        "addl $8, %esp\n"
+        "jmp *_g_sfx_init_bail\n"
+        "1:\n"
+        "jmp *_g_sfx_orig_581d27\n"
+    );
+}
+
+/* replaces the CONTROLUNAVAIL retry tail at 0x58921B.
+   Entry state: EAX = this (the 6-byte MOV right before the JMP into
+   this stub). [this+4] = hr of the retry CreateSoundBuffer.
+   hr >= 0: [this+0x1c] = 0 (the replaced tail's work) -> 0x58923E.
+   hr < 0: sound-disabled flag -> init epilogue. */
+__attribute__((naked)) static void stub_sound_retry_check(void) {
+    __asm__ volatile (
+        "cmpl $0, 4(%eax)\n"
+        "jge 1f\n"
+        "movl _g_sfx_nosound, %ecx\n"
+        "movb $1, (%ecx)\n"
+        "jmp *_g_sfx_init_bail\n"
+        "1:\n"
+        "movb $0, 0x1c(%eax)\n"
+        "jmp *_g_sfx_retry_cont\n"
+    );
+}
+
+/* replaces the CALL 0x582dcd at 0x582d3f (the fatal handler inside
+   FUN_00581d27). Entry: [esp] = retaddr, [esp+4] = this, [esp+8] = msg;
+   EBP = FUN_00581d27's own frame -> [EBP+4] = the return address of
+   FUN_00581d27's CALLER (the failing call site), [EBP+8] = hr.
+   Logs (site + hr + msg) + disables sound + RET; the caller then does
+   ADD ESP,8. */
+__attribute__((naked)) static void stub_sound_fatal_msg(void) {
+    __asm__ volatile (
+        "movl 8(%esp), %eax\n"
+        "pushl %eax\n"
+        "movl 8(%ebp), %ecx\n"
+        "pushl %ecx\n"
+        "movl 4(%ebp), %edx\n"
+        "pushl %edx\n"
+        "call _sound_fatal_fallback\n"
+        "addl $12, %esp\n"
+        "ret\n"
+    );
+}
+
+static void patch_sound_fix(void* exe) {
+    if (!g_cfg_soundfix) return;
+    DWORD base = (DWORD)exe;
+    g_sfx_init_bail = (void*)(base + (0x5892D7 - 0x400000));
+    g_sfx_orig_581d27 = (void*)(base + (0x581D27 - 0x400000));
+    g_sfx_nosound = (void*)(base + (0xC66FA0 - 0x400000));
+    g_sfx_retry_cont = (void*)(base + (0x58923E - 0x400000));
+    int n = 0;
+
+    /* 1) the init's four fatal handler calls -> check-and-bail stub */
+    {
+        static const DWORD sites[4] = { 0x58917E, 0x589239, 0x589275, 0x5892C7 };
+        for (int i = 0; i < 4; i++) {
+            BYTE* p = (BYTE*)base + (sites[i] - 0x400000);
+            if (p[0] != 0xE8) continue;
+            DWORD tgt = sites[i] + 5 + *(DWORD*)(p + 1);
+            if (tgt != 0x581D27) continue;   /* re-patched or wrong binary: skip */
+            DWORD nrel = (DWORD)((BYTE*)&stub_sound_init_check - (p + 5));
+            DWORD oldp;
+            VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &oldp);
+            *(DWORD*)(p + 1) = nrel;
+            VirtualProtect(p, 5, oldp, &oldp);
+            n++;
+        }
+    }
+
+    /* 2) the CONTROLUNAVAIL retry tail (had NO error check at all) */
+    {
+        BYTE* p = (BYTE*)base + (0x58921B - 0x400000);
+        /* original 12 bytes: 8B 85 58 FF FF FF (mov eax,[ebp-0xA8])
+           C6 40 1C 00 (mov byte [eax+0x1c],0) EB 17 (jmp 0x58923E) */
+        if (p[0] == 0x8B && p[1] == 0x85 && p[2] == 0x58 && p[3] == 0xFF &&
+            p[4] == 0xFF && p[5] == 0xFF && p[6] == 0xC6 && p[7] == 0x40 &&
+            p[8] == 0x1C && p[9] == 0x00 && p[10] == 0xEB) {
+            DWORD nrel = (DWORD)((BYTE*)&stub_sound_retry_check - (p + 11));
+            BYTE nb[12];
+            nb[0] = 0x8B; nb[1] = 0x85; nb[2] = 0x58; nb[3] = 0xFF;
+            nb[4] = 0xFF; nb[5] = 0xFF;          /* mov eax,[ebp-0xA8] */
+            nb[6] = 0xE9;                         /* jmp stub */
+            *(DWORD*)(nb + 7) = nrel;
+            nb[11] = 0x90;                        /* nop */
+            DWORD oldp;
+            VirtualProtect(p, 12, PAGE_EXECUTE_READWRITE, &oldp);
+            for (int i = 0; i < 12; i++) p[i] = nb[i];
+            VirtualProtect(p, 12, oldp, &oldp);
+            n++;
+        }
+    }
+
+    /* 3) the fatal handler call inside FUN_00581d27 -> log + disable + return */
+    {
+        BYTE* p = (BYTE*)base + (0x582D3F - 0x400000);
+        if (p[0] == 0xE8) {
+            DWORD tgt = 0x582D3F + 5 + *(DWORD*)(p + 1);
+            if (tgt == 0x582DCD) {               /* re-patched or wrong binary: skip */
+                DWORD nrel = (DWORD)((BYTE*)&stub_sound_fatal_msg - (p + 5));
+                DWORD oldp;
+                VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &oldp);
+                *(DWORD*)(p + 1) = nrel;
+                VirtualProtect(p, 5, oldp, &oldp);
+                n++;
+            }
+        }
+    }
+
+    if (n) {
+        g_sfx_installed = 1;
+        char buf[80];
+        _snprintf(buf, sizeof(buf), "== SoundFix installed: %d sites ==\n", n);
+        log_line(buf);
+    }
+    else if (!g_sfx_installed && !g_sfx_warned) {
+        g_sfx_warned = 1;
+        log_line("== SoundFix: no sites patched (bytes changed?) ==\n");
+    }
+}
+
+/* ---- EffectGuard: stale effect-event object skip (v71) ----
+   See the v71 header. The call site 0x5CACD8 (obj->vtbl+0xEC, the
+   protected effect-event pump) is re-targeted to a stub that skips
+   objects whose event array [obj+0x34] or entry count [obj+0x14]
+   look stale - the exact signature of the observed random AV. The
+   protected method itself cannot be patched. ---- */
+
+static int g_guard_logged = 0;
+
+__attribute__((used, noinline)) static int sfx_guard_obj(DWORD obj) {
+    if (!obj || obj < 0x10000 || obj > 0x7FFE0000 || IsBadReadPtr((void*)obj, 0x40))
+        return 0;
+    DWORD arr = *(DWORD*)(obj + 0x34);
+    DWORD cnt = *(DWORD*)(obj + 0x14);
+    if (arr < 0x10000 || arr > 0x7FFE0000 || cnt > 0x10000) {
+        if (!g_guard_logged) {
+            g_guard_logged = 1;
+            char buf[160];
+            _snprintf(buf, sizeof(buf),
+                "== EffectGuard: skipped stale effect-event object 0x%X (arr=0x%X cnt=0x%X) ==\n",
+                obj, arr, cnt);
+            log_line(buf);
+        }
+        return 0;
+    }
+    return 1;
+}
+
+/* Entry: ECX = obj (thiscall), EAX = obj's vtable, [esp] = retaddr,
+   [esp+4] = the pushed element arg. The vanilla method returns with
+   a plain RET and leaves the element arg on the stack (the caller's
+   0x138 call accounts for it) - the stub preserves that exactly. */
+__attribute__((naked)) static void stub_5cacd8(void) {
+    __asm__ volatile (
+        "pushl %ecx\n"
+        "call _sfx_guard_obj\n"
+        "addl $4, %esp\n"
+        "testl %eax, %eax\n"
+        "jz 1f\n"
+        "movl (%ecx), %eax\n"
+        "call *0xec(%eax)\n"
+        "ret\n"
+        "1:\n"
+        "xorl %eax, %eax\n"
+        "ret\n"
+    );
+}
+
+static void patch_effect_guard(void* exe) {
+    BYTE* p = (BYTE*)exe + (0x5CACD8 - 0x400000);
+    if (p[0] == 0xE8) return;   /* already patched */
+    /* original: FF 90 EC 00 00 00 = CALL [EAX+0xEC] */
+    if (p[0] != 0xFF || p[1] != 0x90 || p[2] != 0xEC ||
+        p[3] != 0x00 || p[4] != 0x00 || p[5] != 0x00) {
+        log_line("== EffectGuard: site bytes mismatch ==\n");
+        return;
+    }
+    DWORD nrel = (DWORD)((BYTE*)&stub_5cacd8 - (p + 5));
+    DWORD oldp;
+    VirtualProtect(p, 6, PAGE_EXECUTE_READWRITE, &oldp);
+    p[0] = 0xE8;
+    *(DWORD*)(p + 1) = nrel;
+    p[5] = 0x90;
+    VirtualProtect(p, 6, oldp, &oldp);
+    log_line("== EffectGuard installed (0x5CACD8) ==\n");
 }
 
 /* startup: if the registry resolution is not one of the 3 modes,
@@ -848,7 +1213,15 @@ static void load_config(void) {
                 "RotationBoost=4.0\n"
                 "; mouse sensitivity for the rotation. 1.0 = vanilla,\n"
                 "; lower = more mouse movement per degree (e.g. 0.4).\n"
-                "RotationSens=1.0\n");
+                "RotationSens=1.0\n"
+                "\n"
+                "[SoundFix]\n"
+                "; 1 = a DirectSound error NEVER shows the fatal \"Sound\n"
+                "; System Error\" box or exits the game. Startup failures\n"
+                "; run the game with sound disabled; runtime errors stop\n"
+                "; the audio and the game keeps going. Errors are logged\n"
+                "; to proj_log.txt. 0 = vanilla behavior (crash on error).\n"
+                "SoundErrorFallbackEnabled=1\n");
             fclose(f);
         }
     }
@@ -881,14 +1254,16 @@ static void load_config(void) {
     g_rotation_sens = cfg_float("RotationSmooth", "RotationSens", 1.0f);
     if (g_rotation_sens < 0.05f) g_rotation_sens = 0.05f;
     if (g_rotation_sens > 4.0f) g_rotation_sens = 4.0f;
+    g_cfg_soundfix = (int)GetPrivateProfileIntA("SoundFix", "SoundErrorFallbackEnabled", 1, g_cfg_path);
     {
         char buf[256];
         _snprintf(buf, sizeof(buf),
-            "== CONFIG %s: Line=%.2f Letter=%.2f Word=%.2f Shift=%.3f+%.0f Row=%.2f/%.2f Cursor=%.2f Icon=%.2f Overlap=%d QoL=%d Suffix=%d Rotation=%d/x%.1f/s%.2f ==\n",
+            "== CONFIG %s: Line=%.2f Letter=%.2f Word=%.2f Shift=%.3f+%.0f Row=%.2f/%.2f Cursor=%.2f Icon=%.2f Overlap=%d QoL=%d Suffix=%d Rotation=%d/x%.1f/s%.2f SoundFix=%d ==\n",
             g_cfg_path, g_cfg_line_factor, g_cfg_letter_spacing, g_cfg_word_spacing,
             g_cfg_shift_factor, g_cfg_shift_slack, g_cfg_row_factor, g_cfg_row4k,
             g_cfg_cursor_scale, g_cfg_icon_scale, g_cfg_overlap_labels, g_qol_enabled,
-            g_cfg_suffix_enabled, g_rotation_enabled, g_rotation_boost, g_rotation_sens);
+            g_cfg_suffix_enabled, g_rotation_enabled, g_rotation_boost, g_rotation_sens,
+            g_cfg_soundfix);
         log_line(buf);
     }
 }
@@ -3483,9 +3858,87 @@ static void patch_qol_d1ef2(void* exe) {
     log_line("== qol d1ef2 flag patched (0x7d1ef2) ==\n");
 }
 
+/* ---- v73 DIAG: game log capture (0x42A8AC) - the game's log writer
+   (prints "ZLib Error: %i Script: %s" / "%s Script not found" etc).
+   Every message is mirrored to proj_log.txt with its first two string
+   args. ---- */
+static DWORD g_diag_count = 0;
+
+static int sfx_printable(DWORD p) {
+    if (p < 0x10000 || p > 0x7FFE0000) return 0;
+    if (IsBadReadPtr((void*)p, 1)) return 0;
+    int i;
+    for (i = 0; i < 96; i++) {
+        char c = *(char*)(p + i);
+        if (c == 0) return 1;
+        if ((unsigned char)c < 32) return 0;
+    }
+    return 0;
+}
+
+__attribute__((used, noinline)) static void diag_logfmt(DWORD fmt, DWORD v1, DWORD v2, DWORD v3, DWORD v4) {
+    if (g_diag_count > 200) return;
+    if (!fmt || fmt < 0x10000 || fmt > 0x7FFE0000) return;
+    if (IsBadReadPtr((void*)fmt, 1)) return;
+    char buf[900];
+    int off = _snprintf(buf, sizeof(buf), "== GAMELOG: \"%s\"", (const char*)fmt);
+    if (sfx_printable(v1)) off += _snprintf(buf + off, sizeof(buf) - off, " a1=\"%s\"", (const char*)v1);
+    else off += _snprintf(buf + off, sizeof(buf) - off, " a1=0x%X", v1);
+    if (sfx_printable(v2)) off += _snprintf(buf + off, sizeof(buf) - off, " a2=\"%s\"", (const char*)v2);
+    else off += _snprintf(buf + off, sizeof(buf) - off, " a2=0x%X", v2);
+    if (sfx_printable(v3)) off += _snprintf(buf + off, sizeof(buf) - off, " a3=\"%s\"", (const char*)v3);
+    else if (v3) off += _snprintf(buf + off, sizeof(buf) - off, " a3=0x%X", v3);
+    if (sfx_printable(v4)) off += _snprintf(buf + off, sizeof(buf) - off, " a4=\"%s\"", (const char*)v4);
+    else if (v4) off += _snprintf(buf + off, sizeof(buf) - off, " a4=0x%X", v4);
+    off += _snprintf(buf + off, sizeof(buf) - off, "\n");
+    log_line(buf);
+    g_diag_count++;
+}
+
+__attribute__((naked)) static void stub_42a8ac(void) {
+    __asm__ volatile (
+        "pushal\n"
+        "movl 56(%esp), %ecx\n"
+        "pushl %ecx\n"
+        "movl 52(%esp), %ecx\n"
+        "pushl %ecx\n"
+        "movl 48(%esp), %ecx\n"
+        "pushl %ecx\n"
+        "movl 44(%esp), %ecx\n"
+        "pushl %ecx\n"
+        "movl 40(%esp), %ecx\n"
+        "pushl %ecx\n"
+        "call _diag_logfmt\n"
+        "addl $20, %esp\n"
+        "popal\n"
+        "pushl %ebp\n"            /* replay 55 8B EC 51 8B 45 08 */
+        "movl %esp, %ebp\n"
+        "pushl %ecx\n"
+        "movl 8(%ebp), %eax\n"
+        "jmp *_g_42a8ac_cont\n"
+    );
+}
+__attribute__((used)) static DWORD g_42a8ac_cont = 0x42a8b3;
+
+static void patch_gamelog_hook(void* exe) {
+    BYTE* p = (BYTE*)exe + (0x42A8AC - 0x400000);
+    static const BYTE want[5] = {0x55, 0x8B, 0xEC, 0x51, 0x8B};
+    if (p[0] == 0xE9) return;
+    if (memcmp(p, want, 5) != 0) {
+        log_line("== gamelog hook bytes mismatch ==\n");
+        return;
+    }
+    DWORD rel = (DWORD)((BYTE*)&stub_42a8ac - (p + 5));
+    DWORD oldp;
+    VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &oldp);
+    p[0] = 0xE9;
+    *(DWORD*)(p + 1) = rel;
+    VirtualProtect(p, 5, oldp, &oldp);
+    log_line("== gamelog hook installed (0x42A8AC) ==\n");
+}
+
 /* ---- mid-function patch helper (5-byte jmp over the verified bytes) ---- */
-static void patch_mid(void* exe, DWORD va, void* stub, const BYTE* want, int len, const char* name) {
-    BYTE* p = (BYTE*)exe + (va - 0x400000);
+static void patch_mid(void* exe, DWORD va, void* stub, const BYTE* want, int len, const char* name) {    BYTE* p = (BYTE*)exe + (va - 0x400000);
     if (p[0] == 0xE9) return;
     if (memcmp(p, want, len) != 0) {
         char buf[160];
@@ -4203,6 +4656,11 @@ static DWORD WINAPI worker(LPVOID arg) {
     HMODULE exe = GetModuleHandleA(NULL);
     g_exe = (BYTE*)exe;
     load_config();
+    /* SoundFix must land before the game's sound-server init (which can
+       run before the W/H wait below finishes) - patch immediately. */
+    patch_sound_fix(exe);
+    patch_effect_guard(exe);
+    patch_gamelog_hook(exe);
     g_pScreenW = (DWORD*)((BYTE*)exe + 0xc5127c - 0x400000);
     g_pScreenH = (DWORD*)((BYTE*)exe + 0xc51280 - 0x400000);
     validate_reg_resolution();
@@ -4283,6 +4741,8 @@ static DWORD WINAPI worker(LPVOID arg) {
         patch_rotation_smooth(exe);
         patch_rotation_sens_entry(exe);
         patch_ai_qol(exe);
+        patch_sound_fix(exe);
+        patch_effect_guard(exe);
     }
     return 0;
 }

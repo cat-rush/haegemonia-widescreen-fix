@@ -1,4 +1,4 @@
-# Haegemonia: Legions of Iron Widescreen mod
+# Haegemonia: Legions of Iron вЂ” Widescreen mod
 
 This document describes every fix, the reverse-engineered data behind it,
 all known addresses, and the build loop.
@@ -55,7 +55,8 @@ Known limitations / pending:
 
 - Warn and ask before anything resource-heavy or suspicious runs on the PC.
 - User installs tools manually. User runs the game and reports visually.
-- User reports visual results; ask precisely.
+- Never touch online/anti-cheat anything; this is single-player, fine.
+- User reports visual results; ask precisely (fractions of screen width).
 
 ## Environment
 
@@ -83,12 +84,20 @@ Known limitations / pending:
   stubs need `used` + `noinline`.
 - REVERT: delete binkw32.dll, rename bink_orig.dll -> binkw32.dll.
   Fonts revert: copy *.chr.bak1x over *.chr + restore GFX\Font\backup\ images.
-- Current restore point: binkw32_v68_stable.dll + hghook.c
-  (v68 = the current head; the message-scene misclassification fix.
+- Current restore point: binkw32_v73_stable.dll + hghook.c
+  (v73 = the head; GAMELOG mirror + .scp-open logging + the mission-
+  script fixes (adler32 packer + the e5m5 2:29 timer).
+  v72 = SoundFix ignores SetNotificationPositions' DSERR_INVALIDCALL
+  after device glitches (keeps sound).
+  v71 = EffectGuard - the random effect-event crash is skipped.
+  v70 = SoundFix teardown sites ignore the E_HANDLE "dying buffer"
+  error and keep the sound running.
+  v69 = SoundFix - DirectSound errors never crash the game.
+  v68 = the message-scene misclassification fix.
   v67 added the message Accept/Decline pick override; v66 the
   back-arrow file patch; v65 the crisp-rotation fix 23 + the menu
   version-text suffix). Older binkw32_v*_stable.dll backups (incl.
-  v67) exist in the working folder and in the game folder.
+  v72) exist in the working folder and in the game folder.
   chrtool_stable.exe = the font tool.
 - The hook's crash filter (g_crash_filter) logs every unhandled exception
   (code/addr/regs/stack/ebp chain) to proj_log.txt.
@@ -106,6 +115,167 @@ Known limitations / pending:
     on the main menu), `SuffixText=widescreen-fix v1.0 by .Nx`,
     `SuffixYellowText=v1.0` (the part painted in the highlight color),
     `SuffixYellowColor=FFFFFFE0` (ARGB hex).
+  * `[SoundFix] SoundErrorFallbackEnabled=1` (default 1): a DirectSound
+    error never shows the fatal "Sound System Error" box / never exits
+    (see "SoundFix" section below). 0 = vanilla fatal behavior.
+
+## SoundFix (v69) - the "Sound System Error" crash
+
+The game's DirectSound error handler FUN_00581d27(this, hr, fatal) formats
+the DirectSound message and, when fatal != 0 AND hr != 0, calls
+FUN_00582dcd: "Sound System Error" MessageBox, then a YES/NO "debug/quit"
+box whose NO path exits with code -1. Every DS call site passes fatal=1
+except the sound-server init's own create-fail path, so ANY DirectSound
+failure (SetCooperativeLevel/CreateSoundBuffer/GetCaps at startup, or
+buffer-lost/device-change errors at runtime) killed the game. This is the
+"pre-mod problem": it exists in vanilla Haegemonia on modern Windows.
+
+The game ALREADY has a graceful mode: DirectSoundCreate8 failure at init
+(0x588F56's loop) sets DAT_00c66fa0 = 1 ("sound disabled" - every sound
+engine entry checks this flag and no-ops; the engine never touches
+DirectSound again) and skips the rest of the init. SoundFix routes every
+other failure into that same mode:
+
+- The 4 fatal init call sites (0x58917E / 0x589239 / 0x589275 / 0x5892C7,
+  all `CALL 0x581D27`, fatal=1) are re-targeted (E8 kept, rel32 -> stub)
+  to stub_sound_init_check: hr >= 0 -> vanilla handler; hr < 0 -> set
+  DAT_00c66fa0=1, drop the return address + 2 args, jump to the init
+  epilogue 0x5892D7 (POP EDI; MOV ESP,EBP; POP EBP; RET). The server
+  ends up exactly as in the vanilla create-fail path.
+- The CONTROLUNAVAIL retry tail at 0x58921B had NO error check at all:
+  a failed retry left the primary buffer NULL and the next GetCaps
+  dereferenced it. The 12-byte tail (MOV EAX,[EBP-0xA8]; MOV byte
+  [EAX+0x1C],0; JMP 0x58923E) is replaced by MOV EAX,[EBP-0xA8]; JMP
+  stub_sound_retry_check; NOP - the stub checks [this+4] and bails like
+  above or does the replaced tail's work and continues at 0x58923E.
+- The fatal handler call inside FUN_00581d27 (0x582D3F -> CALL 0x582DCD)
+  is re-targeted to stub_sound_fatal_msg: logs the game's own error text
+  to proj_log.txt ("SoundFix: DirectSound error ..."), sets
+  DAT_00c66fa0 = 1 and RETURNS. Runtime errors stop the audio and the
+  game keeps going.
+
+The runtime fallback now also logs the raw HRESULT and the RETURN
+ADDRESS of FUN_00581d27's caller (site = retaddr - 5), and makes a
+per-site decision:
+- Teardown/pause sites (retaddrs 0x57DAF3 / 0x57DB27 = FUN_0057da88's
+  Stop + SetCurrentPosition(0) calls; 0x57DC31 = FUN_0057dbce's Stop):
+  the error is IGNORED (rate-limited log) and the sound KEEPS RUNNING.
+  The observed runtime failure was E_HANDLE (0x80070006) at 0x57DAF3 -
+  on modern Windows the WASAPI-backed dsound emulation returns
+  E_HANDLE when Stop is called on a buffer that already died (old
+  Windows returned S_OK). The channel is being torn down anyway, so
+  there is nothing to recover - vanilla treated it as fatal, which was
+  the user's "random" crash.
+- 0x589E59 (FUN_00589ccb's SetNotificationPositions in the channel
+  restart setup): DSERR_INVALIDCALL (0x88780032) is ignored (v72).
+  After a device glitch the freshly recreated buffer can reject the
+  notify call while staying playable; the streaming fill polls
+  GetCurrentPosition so notifications are not required. Any OTHER hr
+  at this site keeps the normal fallback.
+- All other sites: log + sound-disabled fallback (as in v69).
+
+## EffectGuard (v71) - the random access-violation crash
+
+User-reported random crash during play (0x4357DA, code 0xC0000005).
+The address is inside the game's DRM-protected 4MB .text block
+(0x435000-0x475000; VirtualQuery shows BaseAddress 0x435000 /
+AllocationBase 0x400000 / PAGE_EXECUTE_READ - the blocks are the
+game's own .text pages, decrypted in place, NOT heap copies; the same
+block pattern was already in the pre-v69 crash log at 0x65F18E).
+
+The call chain (EBP walk): FUN_0069e24e (main loop) -> FUN_0046a08f
+(the per-frame effect/animation update) -> FUN_005cac5a (the event
+pump: walks the global element list [0xC68314]+0x44/0x4C and calls
+obj->vtbl+0xEC per element) -> protected method (0x4356A9, loops the
+object's event table calling 0x4357C4 per flag) -> crash in 0x4357C4
+at "CMP [EAX+EDX*8+4],0" with EAX == [obj+0x34] == 1.
+
+Cause: obj is ALIVE (its vtable call executed - only its internal
+event array [obj+0x34] is stale (value 1 = freed array that was never
+zeroed), so the protected method dereferences pointer 1 and dies.
+Classic premature-teardown / use-after-free in the game's effect
+system - a VANILLA bug (present in the logs before the sound fix),
+random because it depends on effect destroy timing.
+
+Fix: the protected code cannot be patched, so the guard sits on the
+vtable call at 0x5CACD8 (plain .text, bytes FF 90 EC 00 00 00):
+stub_5cacd8 validates obj + [obj+0x34] + the entry count [obj+0x14]
+and skips the call (returns 0) for stale objects, logging
+"EffectGuard: skipped stale effect-event object ..." once. The
+vanilla method returns with plain RET leaving the element arg on the
+stack (the caller's next 0x138 call absorbs it) - the stub preserves
+that stack shape exactly. Skipped objects just miss their events for
+that frame; if the object recovers (re-created array) the guard
+passes it through again. Idempotent, re-applied in the worker loop.
+Note: the OLD pre-v69 crash (0x65F18E, caller 0x425D993 - a vector
+new[] path) is a DIFFERENT site and is NOT yet guarded; if it recurs
+it needs its own analysis.
+
+All sites are verified by byte signature before writing, idempotent, and
+re-applied in the worker's 3s loop (same as the other patches, in case
+the game's code protection re-encrypts the region). patch_sound_fix also
+runs FIRST in the worker (before the W/H wait) because sound init can
+happen before graphics init. Note: the DirectSoundEnumerateA check site
+(0x589085) is deliberately NOT converted - if enumerate fails the device
+list is empty and the create loop lands in the vanilla graceful path.
+
+Addresses (all VA; runtime = base + VA - 0x400000):
+- FUN_00581d27 = 0x581D27 (handler), FUN_00582dcd = 0x582DCD (fatal box)
+- init FUN_00588f56 = 0x588F56..0x5892DB; epilogue = 0x5892D7;
+  create-fail graceful path = 0x589116..0x589140 (sets DAT_00c66fa0)
+- DAT_00c66fa0 = sound-disabled flag (byte), DAT_00c66fd0 = EAX/3D mode
+- error strings: "Sound System Error" 0xC0FBD8, "No sound driver is
+  available for use" 0xC0F974, "An undetermined error occured inside
+  the DirectSound subsystem" 0xC0F7E0.
+
+Pending risk (accepted): after a RUNTIME error the caller that failed
+continues with whatever state its DirectSound call left (e.g. the
+streaming fill loop FUN_00589665 could touch garbage lock pointers).
+Vanilla exited instead. If a post-error crash shows up in proj_log.txt
+the fill loop needs a targeted bail-out; the startup crash (the reported
+"usual" one) is fully covered.
+
+## Mission scripts: scpeditor + the e5m5 timer saga (v73)
+
+Three independent problems were stacked on top of each other:
+
+1. **The scpeditor's packer omitted the zlib ADLER32 trailer.** The
+   game's .scp loader reads `filesize - 4` bytes (it strips a 4-byte
+   trailer) and inflates with zlib - the output size is compared
+   against the declared u32 size. Without the adler32 the stream ends
+   mid-checksum; the game logged "ZLib Error: %i Script: %s" and the
+   script failed to load. EVERY file the editor packed was affected,
+   including the mod's own Game_inf\Levels\randomevents\
+   heroorganizer.scp (installed 19.10). Fixed: compressScp now writes
+   the adler32 (inflate.cpp); heroorganizer.scp re-packed
+   (backup: heroorganizer_broken_backup.scp); packscp.exe = the
+   standalone fixed packer.
+2. **heroorganizer.scp broke e5m5 entirely.** Ep5m5.scp includes it
+   (line 1396); the failed include killed the whole mission tree:
+   no timer, no dialogues, no task tracking. The user attributed it
+   to their timer edit, but the mission had been broken since 19.10.
+   (Found via the v73 GAMELOG mirror: "ZLib Error: ... Script:
+   ...heroorganizer.scp".)
+3. **The scpeditor wrote a NUL byte into attribute values.** The
+   editor's App::w2u converted a wstring that CONTAINED a trailing
+   NUL (the type combo-box text is read with an n+1 buffer) using
+   w.size() - the NUL landed INSIDE the XML attribute
+   (`Type="All\0"`), the game's script parser rejected the file and
+   the include killed the whole mission tree. That is why the user's
+   2:30 counter edit "broke" e5m5 while the same values rebuilt from
+   the clean decode work perfectly - THERE IS NO 150-MINUTE LIMIT
+   (the earlier "2:29 max" conclusion was an artifact of the test
+   files). Fixed: w2u now uses wcslen (both editors), and
+   serializeXml strips control chars from attrs/text as a last-line
+   defense. The user's 2:30 timer (GetValue2Difficulty(30,30,30) +
+   (2,2,2)) is in the shipped counterE5M5.scp and works.
+
+Diagnostic helpers now in the hook (v73): the game's log writer
+(0x42A8AC) is mirrored to proj_log.txt ("== GAMELOG:" lines, capped
+200/session), and every .scp file open is logged ("== FILEOPEN .scp:").
+The game reads packed .scp as `u32 size + 78 DA + deflate + adler32`
+and reads `filesize - 4` bytes total (the trailer is not read; the
+inflate is validated by the declared size).
 
 ## Tweak constants (in hghook.c)
 
