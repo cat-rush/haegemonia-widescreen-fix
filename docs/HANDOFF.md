@@ -255,7 +255,11 @@ Three independent problems were stacked on top of each other:
    no timer, no dialogues, no task tracking. The user attributed it
    to their timer edit, but the mission had been broken since 19.10.
    (Found via the v73 GAMELOG mirror: "ZLib Error: ... Script:
-   ...heroorganizer.scp".)
+   ...heroorganizer.scp".) Note: the file's CONTENT was always
+   byte-identical to vanilla (the QoL extension never actually
+   modified it - the 19.10 release-build session only re-packed it,
+   and that repack was the breakage). It is no longer shipped in
+   release-1.0; the QoL only needs Start.inf.
 3. **The scpeditor wrote a NUL byte into attribute values.** The
    editor's App::w2u converted a wstring that CONTAINED a trailing
    NUL (the type combo-box text is read with an n+1 buffer) using
