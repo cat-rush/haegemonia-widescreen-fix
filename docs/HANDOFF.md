@@ -51,13 +51,6 @@ Known limitations / pending:
 - QoL cosmetic fixes (yellow-selection follows the click; the editing row
   live-updates) are implemented but still pending user verification.
 
-## User rules (CRITICAL)
-
-- Warn and ask before anything resource-heavy or suspicious runs on the PC.
-- User installs tools manually. User runs the game and reports visually.
-- Never touch online/anti-cheat anything; this is single-player, fine.
-- User reports visual results; ask precisely (fractions of screen width).
-
 ## Environment
 
 - Game: C:\Program Files (x86)\Steam\steamapps\common\Haegemonia Legions of Iron
